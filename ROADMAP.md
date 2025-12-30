@@ -21,15 +21,13 @@
 - [x] `pg_constraints`
 - [x] `pg_explain` (query plan)
 
-## Phase 3: Safety System
-- [ ] Table blacklist patterns
-- [ ] Query pattern blocking
-- [ ] WHERE clause requirement for UPDATE/DELETE
-
-## Phase 4: Write Operations
-- [ ] `pg_execute` (INSERT/UPDATE/DELETE)
-- [ ] Permission gating
-- [ ] RETURNING handling
+## Phase 3+4: Safety + Write (Combined) ✓
+- [x] Table blacklist patterns
+- [x] Query pattern blocking
+- [x] WHERE clause requirement for UPDATE/DELETE
+- [x] `pg_execute` (INSERT/UPDATE/DELETE)
+- [x] Permission gating
+- [x] RETURNING handling
 
 ## Phase 5: Statistics
 - [ ] `pg_connections`
@@ -47,10 +45,9 @@
 |---------|-------|-------------|
 | 0.1.0 | 1 | Read-only queries + basic schema |
 | 0.2.0 | 2 | Schema deep dive |
-| 0.3.0 | 3 | Safety system |
-| 0.4.0 | 4 | Write operations |
-| 0.5.0 | 5 | Statistics |
+| 0.3.0 | 3+4 | Safety system + write operations |
+| 0.4.0 | 5 | Statistics |
 
 ---
 
-**Status:** v0.2.0 released (schema deep dive)
+**Status:** v0.3.0 released (safety + write operations)

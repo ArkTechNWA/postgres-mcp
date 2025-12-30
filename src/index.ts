@@ -708,6 +708,151 @@ server.tool(
 );
 
 // ============================================================================
+// TOOLS: Write Operations (v0.4.0 with v0.3.0 Safety)
+// ============================================================================
+
+/**
+ * Check if query has a WHERE clause (for UPDATE/DELETE safety)
+ */
+function hasWhereClause(query: string): boolean {
+  const upperQuery = query.toUpperCase();
+  // Check for WHERE that's not inside a subquery or CTE
+  // Simple heuristic: look for WHERE followed by something other than SELECT
+  const whereMatch = upperQuery.match(/\bWHERE\b/g);
+  if (!whereMatch) return false;
+
+  // Make sure there's a WHERE after the main UPDATE/DELETE
+  const updateMatch = upperQuery.match(/\bUPDATE\b.*\bWHERE\b/s);
+  const deleteMatch = upperQuery.match(/\bDELETE\b.*\bWHERE\b/s);
+
+  return !!(updateMatch || deleteMatch);
+}
+
+/**
+ * Extract table name from INSERT/UPDATE/DELETE query
+ */
+function extractTargetTable(query: string): string | null {
+  const upperQuery = query.toUpperCase().trim();
+
+  // INSERT INTO table_name
+  const insertMatch = query.match(/INSERT\s+INTO\s+(?:"?(\w+)"?\.)?\"?(\w+)\"?/i);
+  if (insertMatch) return insertMatch[2];
+
+  // UPDATE table_name
+  const updateMatch = query.match(/UPDATE\s+(?:ONLY\s+)?(?:"?(\w+)"?\.)?\"?(\w+)\"?/i);
+  if (updateMatch) return updateMatch[2];
+
+  // DELETE FROM table_name
+  const deleteMatch = query.match(/DELETE\s+FROM\s+(?:ONLY\s+)?(?:"?(\w+)"?\.)?\"?(\w+)\"?/i);
+  if (deleteMatch) return deleteMatch[2];
+
+  return null;
+}
+
+server.tool(
+  "pg_execute",
+  "Execute INSERT/UPDATE/DELETE queries (requires write permission)",
+  {
+    query: z.string().describe("SQL query (INSERT, UPDATE, or DELETE)"),
+    params: z.array(z.unknown()).optional().describe("Query parameters ($1, $2, etc)"),
+    returning: z.boolean().optional().describe("Add RETURNING * to get affected rows"),
+  },
+  async ({ query, params, returning = false }) => {
+    // Check write permission
+    if (!config.permissions.write) {
+      return {
+        content: [{ type: "text", text: "Permission denied: write access not enabled. Set PG_MCP_WRITE=true or config.permissions.write=true" }],
+      };
+    }
+
+    const upperQuery = query.toUpperCase().trim();
+
+    // Only allow INSERT, UPDATE, DELETE
+    const isInsert = upperQuery.startsWith("INSERT");
+    const isUpdate = upperQuery.startsWith("UPDATE");
+    const isDelete = upperQuery.startsWith("DELETE");
+
+    if (!isInsert && !isUpdate && !isDelete) {
+      return {
+        content: [{ type: "text", text: "Permission denied: only INSERT, UPDATE, DELETE allowed. Use pg_query for SELECT." }],
+      };
+    }
+
+    // Check for blocked patterns
+    const blocked = containsBlockedPattern(query, config.safety.blocked_patterns);
+    if (blocked) {
+      return { content: [{ type: "text", text: `Blocked pattern detected: ${blocked}` }] };
+    }
+
+    // Check table blacklist
+    const targetTable = extractTargetTable(query);
+    if (targetTable && matchesBlacklist(targetTable, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${targetTable} is blacklisted` }] };
+    }
+
+    // Require WHERE clause for UPDATE/DELETE (safety)
+    if ((isUpdate || isDelete) && config.safety.require_where) {
+      if (!hasWhereClause(query)) {
+        return {
+          content: [{ type: "text", text: "Safety error: UPDATE/DELETE requires WHERE clause. Set safety.require_where=false to disable this check (DANGEROUS)." }],
+        };
+      }
+    }
+
+    // Add RETURNING if requested
+    let finalQuery = query.trim();
+    if (returning && !upperQuery.includes("RETURNING")) {
+      finalQuery += " RETURNING *";
+    }
+
+    try {
+      const start = Date.now();
+      const client = await pool.connect();
+
+      try {
+        const result = await withTimeout(
+          client.query(finalQuery, params),
+          config.neverhang.query_timeout,
+          "Query timed out"
+        );
+
+        const duration = Date.now() - start;
+
+        const response: Record<string, unknown> = {
+          query: query.slice(0, 200) + (query.length > 200 ? "..." : ""),
+          operation: isInsert ? "INSERT" : isUpdate ? "UPDATE" : "DELETE",
+          affected_rows: result.rowCount,
+          execution_time: formatDuration(duration),
+        };
+
+        if (returning && result.rows.length > 0) {
+          // Filter out blacklisted columns from returned rows
+          response.returned_rows = result.rows.map((row) => {
+            const filtered: Record<string, unknown> = {};
+            for (const [key, value] of Object.entries(row)) {
+              if (!matchesBlacklist(key, config.safety.blacklist_columns)) {
+                filtered[key] = value;
+              }
+            }
+            return filtered;
+          });
+        }
+
+        return {
+          content: [{ type: "text", text: JSON.stringify(response, null, 2) }],
+        };
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 
