@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.1",
+  version: "0.6.2",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -1415,21 +1415,37 @@ server.tool(
       return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
     }
 
-    // Check Anthropic client availability
-    if (!anthropic) {
-      return {
-        content: [{
-          type: "text",
-          text: `pg_ask unavailable: ${anthropicError || "Anthropic client not initialized"}. Set ANTHROPIC_API_KEY in the MCP server environment.`
-        }]
-      };
-    }
-
     try {
       const start = Date.now();
 
-      // Get schema context
+      // Get schema context (needed for both modes)
       const schemaContext = await getSchemaContext(tables, schema);
+
+      // FALLBACK MODE: If no Anthropic client, return schema context for caller to generate SQL
+      if (!anthropic) {
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({
+              mode: "fallback",
+              message: "pg_ask is in fallback mode (no ANTHROPIC_API_KEY). Schema context provided - please generate a SELECT query and use pg_query to execute it.",
+              question,
+              schema_context: schemaContext,
+              instructions: {
+                step_1: "Analyze the schema_context above",
+                step_2: "Generate a PostgreSQL SELECT query to answer the question",
+                step_3: "Use pg_query tool to execute the SQL",
+                rules: [
+                  "Only SELECT queries (no INSERT/UPDATE/DELETE)",
+                  "Respect column names exactly as shown",
+                  "Skip any columns marked REDACTED",
+                  "Add reasonable LIMIT if not specified (max 100)"
+                ]
+              }
+            }, null, 2)
+          }]
+        };
+      }
 
       // Translate NL to SQL via Haiku
       const prompt = `You are a SQL expert. Given this PostgreSQL schema:
