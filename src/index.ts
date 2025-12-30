@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.2",
+  version: "0.6.3",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -1428,7 +1428,7 @@ server.tool(
             type: "text",
             text: JSON.stringify({
               mode: "fallback",
-              message: "pg_ask is in fallback mode (no ANTHROPIC_API_KEY). Schema context provided - please generate a SELECT query and use pg_query to execute it.",
+              message: "pg_ask fallback mode activated. To enable direct NL→SQL via Haiku, add ANTHROPIC_API_KEY to ~/.claude.json under mcpServers.postgres-mcp.env",
               question,
               schema_context: schemaContext,
               instructions: {
