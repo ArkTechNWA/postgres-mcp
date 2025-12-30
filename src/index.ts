@@ -23,6 +23,8 @@ import {
   truncate,
 } from "./utils.js";
 import { NeverhangManager, NeverhangError } from "./neverhang.js";
+import { initDatabase, closeDatabase, getDatabaseStats } from "./db.js";
+import type Database from "better-sqlite3";
 
 const { Pool } = pg;
 
@@ -34,8 +36,11 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.9",
+  version: "0.7.0",
 });
+
+// Initialize A.L.A.N. database for persistent NEVERHANG state
+const db: Database.Database = initDatabase();
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
 // Uses ANTHROPIC_API_KEY from environment
@@ -70,7 +75,7 @@ const poolConfig: pg.PoolConfig = {
 
 const pool = new Pool(poolConfig);
 
-// Initialize NEVERHANG manager with ping function
+// Initialize NEVERHANG manager with ping function and A.L.A.N. database
 const neverhang = new NeverhangManager(config.neverhang, async () => {
   const client = await pool.connect();
   try {
@@ -78,7 +83,7 @@ const neverhang = new NeverhangManager(config.neverhang, async () => {
   } finally {
     client.release();
   }
-});
+}, db);
 
 // ============================================================================
 // HELPER: Safe query execution with NEVERHANG
@@ -91,11 +96,26 @@ interface QueryResult {
   duration: number;
 }
 
+/**
+ * Determine query complexity for A.L.A.N. tracking
+ */
+function determineComplexity(sql: string): string {
+  const upper = sql.toUpperCase();
+  if (/\bJOIN\b.*\bJOIN\b/.test(upper)) return "multi_join";
+  if (/\bJOIN\b/.test(upper)) return "join";
+  if (/\bGROUP BY\b/.test(upper) || /\bHAVING\b/.test(upper)) return "aggregate";
+  if (/\bWITH\b/.test(upper)) return "cte";
+  if (/\bSUBQUERY\b|\(\s*SELECT\b/.test(upper)) return "subquery";
+  if (/\bINSERT\b|\bUPDATE\b|\bDELETE\b/.test(upper)) return "write";
+  return "simple";
+}
+
 async function safeQuery(
   sql: string,
   params?: unknown[],
-  options?: { maxRows?: number; timeout_ms?: number }
+  options?: { maxRows?: number; timeout_ms?: number; toolName?: string }
 ): Promise<QueryResult> {
+  const toolName = options?.toolName ?? "pg_query";
   const maxRows = options?.maxRows ?? config.safety.max_rows;
   const start = Date.now();
 
@@ -130,6 +150,8 @@ async function safeQuery(
     finalSql = `${finalSql} LIMIT ${maxRows}`;
   }
 
+  const complexity = determineComplexity(sql);
+
   let client: pg.PoolClient;
   try {
     client = await withTimeout(
@@ -138,11 +160,12 @@ async function safeQuery(
       "Connection timeout"
     );
   } catch (error) {
-    neverhang.recordFailure(sql);
+    const duration = Date.now() - start;
+    neverhang.recordFailure(toolName, complexity, duration, sql, "connection_failed");
     throw new NeverhangError(
       "connection_failed",
       `Failed to connect: ${error instanceof Error ? error.message : "Unknown"}`,
-      Date.now() - start,
+      duration,
       { cause: error instanceof Error ? error : undefined }
     );
   }
@@ -154,13 +177,14 @@ async function safeQuery(
       `Query timed out after ${timeout_ms}ms (${timeoutReason})`
     );
 
-    neverhang.recordSuccess();
+    const duration = Date.now() - start;
+    neverhang.recordSuccess(toolName, complexity, duration);
 
     return {
       rows: result.rows,
       rowCount: result.rowCount ?? result.rows.length,
       fields: result.fields.map((f) => ({ name: f.name, dataTypeID: f.dataTypeID })),
-      duration: Date.now() - start,
+      duration,
     };
   } catch (error) {
     const duration = Date.now() - start;
@@ -175,7 +199,7 @@ async function safeQuery(
       failureType = "connection_failed";
     }
 
-    neverhang.recordFailure(sql);
+    neverhang.recordFailure(toolName, complexity, duration, sql, failureType);
 
     throw new NeverhangError(
       failureType,
@@ -896,9 +920,10 @@ server.tool(
       finalQuery += " RETURNING *";
     }
 
-    try {
-      const start = Date.now();
+    const start = Date.now();
+    const complexity = determineComplexity(query);
 
+    try {
       // NEVERHANG: Circuit breaker check
       const canExecute = neverhang.canExecute();
       if (!canExecute.allowed) {
@@ -919,8 +944,8 @@ server.tool(
           `Query timed out after ${timeout_ms}ms`
         );
 
-        neverhang.recordSuccess();
         const duration = Date.now() - start;
+        neverhang.recordSuccess("pg_execute", complexity, duration);
 
         const response: Record<string, unknown> = {
           query: query.slice(0, 200) + (query.length > 200 ? "..." : ""),
@@ -949,7 +974,9 @@ server.tool(
         client.release();
       }
     } catch (error) {
-      neverhang.recordFailure(query);
+      const duration = Date.now() - start;
+      const errorType = (error instanceof Error && error.message.includes("timeout")) ? "timeout" : "query_error";
+      neverhang.recordFailure("pg_execute", complexity, duration, query, errorType);
       return {
         content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
       };
@@ -1296,6 +1323,9 @@ server.tool(
       circuitOpensIn = `${Math.ceil(stats.circuit_opens_in / 1000)}s`;
     }
 
+    // A.L.A.N. persistent stats
+    const alanStats = getDatabaseStats(db);
+
     return {
       content: [
         {
@@ -1319,6 +1349,12 @@ server.tool(
               },
               last_success: stats.last_success,
               uptime_percent: neverhang.getUptimePercent(),
+              alan: {
+                queries_24h: alanStats.queries_24h,
+                success_rate_24h: Math.round(alanStats.success_rate_24h * 100) + "%",
+                avg_latency_by_complexity: alanStats.avg_latency_by_complexity,
+                health_trend: alanStats.health_trend,
+              },
               config: {
                 base_timeout_ms: config.neverhang.base_timeout_ms,
                 connection_timeout_ms: config.neverhang.connection_timeout_ms,
@@ -1816,11 +1852,12 @@ async function main() {
   // Start NEVERHANG background health monitoring
   neverhang.start();
 
-  console.error("[postgres-mcp] Running on stdio (NEVERHANG v2.0)");
+  console.error("[postgres-mcp] Running on stdio (NEVERHANG v2.0 + A.L.A.N.)");
   console.error(`[postgres-mcp] Permissions: read=${config.permissions.read}, write=${config.permissions.write}`);
   console.error(`[postgres-mcp] NEVERHANG: base_timeout=${config.neverhang.base_timeout_ms}ms, connect_timeout=${config.neverhang.connection_timeout_ms}ms`);
   console.error(`[postgres-mcp] Circuit: threshold=${config.neverhang.circuit_failure_threshold} failures, open_duration=${config.neverhang.circuit_open_duration_ms}ms`);
   console.error(`[postgres-mcp] Database: ${config.connection.host}:${config.connection.port}/${config.connection.database}`);
+  console.error("[postgres-mcp] A.L.A.N. persistence active (circuit state + query history)");
 }
 
 main().catch((error) => {
@@ -1831,12 +1868,14 @@ main().catch((error) => {
 // Cleanup on exit
 process.on("SIGINT", async () => {
   neverhang.stop();
+  closeDatabase(db);
   await pool.end();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
   neverhang.stop();
+  closeDatabase(db);
   await pool.end();
   process.exit(0);
 });

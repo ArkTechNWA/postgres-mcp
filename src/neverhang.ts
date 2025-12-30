@@ -1,12 +1,24 @@
 /**
- * NEVERHANG v2.0 - Reliability is a methodology
+ * NEVERHANG v2.0 + A.L.A.N. - Reliability is a methodology
  *
  * Components:
  * - HealthMonitor: Proactive database health detection
- * - CircuitBreaker: Fast-fail when database is known-bad
+ * - CircuitBreaker: Fast-fail when database is known-bad (persistent)
  * - AdaptiveTimeout: Adjust timeouts based on query complexity and health
  * - NeverhangError: Failure taxonomy with actionable information
+ * - A.L.A.N.: Persistent SQLite state across restarts
  */
+
+import Database from "better-sqlite3";
+import {
+  loadCircuitState,
+  saveCircuitState,
+  recordHealthCheck,
+  recordQuery,
+  getP95Latency,
+  getDatabaseStats,
+  type DatabaseStats,
+} from "./db.js";
 
 // ============================================================================
 // CONFIGURATION
@@ -157,10 +169,12 @@ export class HealthMonitor {
   private config: NeverhangConfig;
   private pingFn: () => Promise<void>;
   private intervalId: NodeJS.Timeout | null = null;
+  private db: Database.Database | null = null;
 
-  constructor(config: NeverhangConfig, pingFn: () => Promise<void>) {
+  constructor(config: NeverhangConfig, pingFn: () => Promise<void>, db?: Database.Database) {
     this.config = config;
     this.pingFn = pingFn;
+    this.db = db ?? null;
     this.state = {
       status: "healthy", // Assume healthy until proven otherwise
       last_check: null,
@@ -208,6 +222,11 @@ export class HealthMonitor {
       this.state.status = "healthy";
       console.error("[neverhang] Health: degraded -> healthy");
     }
+
+    // Record to A.L.A.N.
+    if (this.db) {
+      recordHealthCheck(this.db, this.state.status, latency_ms, true);
+    }
   }
 
   private recordFailure(): void {
@@ -223,6 +242,11 @@ export class HealthMonitor {
     } else if (this.state.status === "degraded" && this.state.consecutive_failures >= 3) {
       this.state.status = "unhealthy";
       console.error("[neverhang] Health: degraded -> unhealthy");
+    }
+
+    // Record to A.L.A.N.
+    if (this.db) {
+      recordHealthCheck(this.db, this.state.status, null, false);
     }
   }
 
@@ -280,15 +304,45 @@ export interface CircuitBreakerState {
 export class CircuitBreaker {
   private state: CircuitBreakerState;
   private config: NeverhangConfig;
+  private db: Database.Database | null = null;
 
-  constructor(config: NeverhangConfig) {
+  constructor(config: NeverhangConfig, db?: Database.Database) {
     this.config = config;
-    this.state = {
-      state: "closed",
-      failures: [],
-      opened_at: null,
-      half_open_successes: 0,
-    };
+    this.db = db ?? null;
+
+    // Load state from A.L.A.N. if available
+    if (this.db) {
+      const saved = loadCircuitState(this.db);
+      this.state = {
+        state: saved.state === "half_open" ? "half-open" : saved.state as CircuitState,
+        failures: saved.failure_count > 0 && saved.last_failure_at
+          ? Array(saved.failure_count).fill(saved.last_failure_at)
+          : [],
+        opened_at: saved.opened_at ? new Date(saved.opened_at) : null,
+        half_open_successes: saved.recovery_successes,
+      };
+      console.error(`[ALAN] Loaded circuit state: ${this.state.state}`);
+    } else {
+      this.state = {
+        state: "closed",
+        failures: [],
+        opened_at: null,
+        half_open_successes: 0,
+      };
+    }
+  }
+
+  private persistState(): void {
+    if (!this.db) return;
+    saveCircuitState(this.db, {
+      state: this.state.state === "half-open" ? "half_open" : this.state.state,
+      failure_count: this.state.failures.length,
+      last_failure_at: this.state.failures.length > 0
+        ? this.state.failures[this.state.failures.length - 1]
+        : null,
+      opened_at: this.state.opened_at?.getTime() ?? null,
+      recovery_successes: this.state.half_open_successes,
+    });
   }
 
   canExecute(): boolean {
@@ -324,6 +378,7 @@ export class CircuitBreaker {
         this.state.failures = [];
         this.state.opened_at = null;
         console.error("[neverhang] Circuit: half-open -> closed (recovered)");
+        this.persistState();
       }
     }
   }
@@ -339,6 +394,7 @@ export class CircuitBreaker {
       this.state.state = "open";
       this.state.opened_at = new Date();
       console.error("[neverhang] Circuit: half-open -> open (test failed)");
+      this.persistState();
       return;
     }
 
@@ -349,6 +405,7 @@ export class CircuitBreaker {
         console.error(
           `[neverhang] Circuit: closed -> open (${this.state.failures.length} failures)`
         );
+        this.persistState();
       }
     }
   }
@@ -508,15 +565,17 @@ export class NeverhangManager {
   readonly health: HealthMonitor;
   readonly circuit: CircuitBreaker;
   readonly timeout: AdaptiveTimeout;
+  private db: Database.Database | null = null;
 
   private startTime: Date;
   private totalQueries: number = 0;
   private successfulQueries: number = 0;
 
-  constructor(config: Partial<NeverhangConfig>, pingFn: () => Promise<void>) {
+  constructor(config: Partial<NeverhangConfig>, pingFn: () => Promise<void>, db?: Database.Database) {
     this.config = { ...DEFAULT_NEVERHANG_CONFIG, ...config };
-    this.health = new HealthMonitor(this.config, pingFn);
-    this.circuit = new CircuitBreaker(this.config);
+    this.db = db ?? null;
+    this.health = new HealthMonitor(this.config, pingFn, db);
+    this.circuit = new CircuitBreaker(this.config, db);
     this.timeout = new AdaptiveTimeout(this.config);
     this.startTime = new Date();
   }
@@ -550,16 +609,42 @@ export class NeverhangManager {
     return complexity.is_explain_analyze;
   }
 
-  recordSuccess(): void {
+  recordSuccess(toolName: string, complexity: string, durationMs: number): void {
     this.totalQueries++;
     this.successfulQueries++;
     this.circuit.recordSuccess();
+
+    // Record to A.L.A.N.
+    if (this.db) {
+      recordQuery(this.db, toolName, complexity, durationMs, true);
+    }
   }
 
-  recordFailure(query: string): void {
+  recordFailure(toolName: string, complexity: string, durationMs: number, query: string, errorType?: string): void {
     this.totalQueries++;
     const excluded = this.isExcludedFromCircuit(query);
     this.circuit.recordFailure(excluded);
+
+    // Record to A.L.A.N.
+    if (this.db) {
+      recordQuery(this.db, toolName, complexity, durationMs, false, errorType);
+    }
+  }
+
+  /**
+   * Get P95 latency for a complexity level from A.L.A.N.
+   */
+  getP95ForComplexity(complexity: string): number | null {
+    if (!this.db) return null;
+    return getP95Latency(this.db, complexity);
+  }
+
+  /**
+   * Get A.L.A.N. database statistics
+   */
+  getDatabaseStats(): DatabaseStats | null {
+    if (!this.db) return null;
+    return getDatabaseStats(this.db);
   }
 
   getStats(): NeverhangStats {

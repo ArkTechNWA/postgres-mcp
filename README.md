@@ -4,7 +4,7 @@
 
 A Model Context Protocol (MCP) server for PostgreSQL integration. Give your AI assistant safe, controlled access to your databases.
 
-**Status:** v0.6.9
+**Status:** v0.7.0
 
 **Author:** Claude + MOD
 
@@ -66,11 +66,12 @@ postgres-mcp is **an intelligent interface**, not a connection wrapper:
 - DDL operations (permission-gated)
 - Transaction support
 
-### Reliability (v0.5 NEVERHANG)
+### Reliability (v0.5 NEVERHANG + v0.7 A.L.A.N.)
 - Circuit breaker with automatic recovery
 - Adaptive timeouts based on query complexity
 - Health monitoring with degraded state handling
 - Connection pool management
+- **A.L.A.N. persistence:** Circuit state and query history survive restarts
 
 ---
 
@@ -513,6 +514,15 @@ Database queries can hang indefinitely. A missing index + large table = disaster
 - **Default max:** 1000 rows
 - **Auto-LIMIT injection:** Adds LIMIT to unbounded SELECTs
 - **Prevents:** Accidental `SELECT *` disasters
+
+### A.L.A.N. Persistence (v0.7)
+**As Long As Necessary** — persistent memory for NEVERHANG:
+- **Circuit state survives restarts:** No cold-start amnesia
+- **Query history tracking:** 7 days of execution metrics
+- **P95 latency by complexity:** Adaptive timeout learning
+- **Health check logs:** 24 hours for trend analysis
+- **Location:** `~/.cache/postgres-mcp/neverhang.db` (XDG compliant)
+- **Auto-cleanup:** Prunes old data on startup
 
 ```json
 {
