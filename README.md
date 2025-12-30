@@ -1,5 +1,7 @@
 # postgres-mcp
 
+[![CI](https://github.com/ArkTechNWA/postgres-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ArkTechNWA/postgres-mcp/actions/workflows/ci.yml)
+
 A Model Context Protocol (MCP) server for PostgreSQL integration. Give your AI assistant safe, controlled access to your databases.
 
 **Status:** v0.6.9
