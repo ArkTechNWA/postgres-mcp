@@ -25,7 +25,7 @@ postgres-mcp connects Claude to your PostgreSQL databases — with granular perm
 1. **Safety first** — Read-only by default, write explicitly enabled
 2. **Query safety** — Statement timeouts, row limits, dangerous pattern blocking
 3. **Schema awareness** — Introspection without data exposure
-4. **Never hang** — Timeouts on everything, cancellation support
+4. **NEVERHANG** — Circuit breaker, adaptive timeouts, health monitoring, graceful degradation
 5. **Natural language** — Ask questions in plain English, get SQL + results
 
 ---
@@ -468,33 +468,37 @@ pg_suggest_schema({
 
 ---
 
-## NEVERHANG Architecture
+## NEVERHANG v2.0 Architecture
 
-Database queries can hang indefinitely. A missing index + large table = disaster.
-
-### Statement Timeout
-- Default: 30s
-- Server-enforced via `SET statement_timeout`
-- Per-query override available
-
-### Connection Timeout
-- Connect timeout: 10s
-- Idle timeout: 60s
-- Connection pooling
-
-### Row Limits
-- Default max: 1000 rows
-- Prevents accidental `SELECT *` disasters
-- Override per-query when needed
+Database queries can hang indefinitely. A missing index + large table = disaster. NEVERHANG is a multi-layered reliability system that ensures postgres-mcp never blocks your AI assistant.
 
 ### Circuit Breaker
-- 3 timeouts in 60s → 5 minute cooldown
-- Tracks connection health
-- Graceful degradation
+- **Automatic trip:** 3 failures in 60s → circuit opens
+- **Cooldown:** 5 minute recovery period
+- **Health states:** `healthy` → `degraded` → `unhealthy`
+- **Graceful degradation:** Returns cached/safe responses when circuit is open
 
-### Query Cancellation
-- Queries can be cancelled mid-flight
-- Uses `pg_cancel_backend()`
+### Adaptive Timeouts
+- **Query complexity analysis:** Simple queries get shorter timeouts
+- **Pattern recognition:** Known-slow patterns (JOINs, subqueries) get longer timeouts
+- **Learning:** Adjusts based on historical query performance
+- **Override:** Per-query timeout always available
+
+### Health Monitor
+- **Continuous ping:** Background health checks
+- **State tracking:** Monitors connection pool health
+- **Recovery detection:** Automatic circuit close when health returns
+- **Metrics:** Success rate, average latency, failure patterns
+
+### Connection Management
+- **Pool limits:** Configurable min/max connections
+- **Idle timeout:** Releases unused connections (default: 60s)
+- **Connection timeout:** Fast fail on connection issues (default: 10s)
+
+### Row Limits
+- **Default max:** 1000 rows
+- **Auto-LIMIT injection:** Adds LIMIT to unbounded SELECTs
+- **Prevents:** Accidental `SELECT *` disasters
 
 ```json
 {
