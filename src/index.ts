@@ -358,6 +358,356 @@ server.tool(
 );
 
 // ============================================================================
+// TOOLS: Schema Deep Dive (v0.2.0)
+// ============================================================================
+
+server.tool(
+  "pg_indexes",
+  "Get index information for tables",
+  {
+    table: z.string().optional().describe("Table name (optional - all tables if omitted)"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+  },
+  async ({ table, schema = "public" }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check table blacklist if specified
+    if (table && matchesBlacklist(table, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${table} is blacklisted` }] };
+    }
+
+    try {
+      let query = `
+        SELECT
+          i.schemaname as schema,
+          i.tablename as table_name,
+          i.indexname as index_name,
+          i.indexdef as definition,
+          pg_relation_size(c.oid) as size_bytes,
+          idx.indisunique as is_unique,
+          idx.indisprimary as is_primary,
+          am.amname as index_type
+        FROM pg_indexes i
+        JOIN pg_class c ON c.relname = i.indexname
+        JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
+        JOIN pg_index idx ON idx.indexrelid = c.oid
+        JOIN pg_am am ON am.oid = c.relam
+        WHERE i.schemaname = $1
+      `;
+
+      const params: unknown[] = [schema];
+
+      if (table) {
+        query += ` AND i.tablename = $2`;
+        params.push(table);
+      }
+
+      query += ` ORDER BY i.tablename, i.indexname`;
+
+      const result = await safeQuery(query, params, { maxRows: 500 });
+
+      const indexes = result.rows
+        .filter((row) => !matchesBlacklist(row.table_name as string, config.safety.blacklist_tables))
+        .map((row) => ({
+          schema: row.schema,
+          table: row.table_name,
+          name: row.index_name,
+          type: row.index_type,
+          is_unique: row.is_unique,
+          is_primary: row.is_primary,
+          size: formatBytes(row.size_bytes as number | null),
+          definition: row.definition,
+        }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                schema,
+                table: table || "all",
+                indexes,
+                count: indexes.length,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_constraints",
+  "Get constraint information (PK, FK, unique, check)",
+  {
+    table: z.string().optional().describe("Table name (optional - all tables if omitted)"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+    type: z.enum(["PRIMARY KEY", "FOREIGN KEY", "UNIQUE", "CHECK"]).optional().describe("Constraint type filter"),
+  },
+  async ({ table, schema = "public", type }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check table blacklist if specified
+    if (table && matchesBlacklist(table, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${table} is blacklisted` }] };
+    }
+
+    try {
+      let query = `
+        SELECT
+          tc.table_schema as schema,
+          tc.table_name,
+          tc.constraint_name,
+          tc.constraint_type,
+          kcu.column_name,
+          ccu.table_name as foreign_table_name,
+          ccu.column_name as foreign_column_name,
+          cc.check_clause
+        FROM information_schema.table_constraints tc
+        LEFT JOIN information_schema.key_column_usage kcu
+          ON tc.constraint_name = kcu.constraint_name
+          AND tc.table_schema = kcu.table_schema
+        LEFT JOIN information_schema.constraint_column_usage ccu
+          ON tc.constraint_name = ccu.constraint_name
+          AND tc.table_schema = ccu.table_schema
+          AND tc.constraint_type = 'FOREIGN KEY'
+        LEFT JOIN information_schema.check_constraints cc
+          ON tc.constraint_name = cc.constraint_name
+          AND tc.table_schema = cc.constraint_schema
+        WHERE tc.table_schema = $1
+      `;
+
+      const params: unknown[] = [schema];
+      let paramIndex = 2;
+
+      if (table) {
+        query += ` AND tc.table_name = $${paramIndex}`;
+        params.push(table);
+        paramIndex++;
+      }
+
+      if (type) {
+        query += ` AND tc.constraint_type = $${paramIndex}`;
+        params.push(type);
+      }
+
+      query += ` ORDER BY tc.table_name, tc.constraint_type, tc.constraint_name`;
+
+      const result = await safeQuery(query, params, { maxRows: 500 });
+
+      // Group constraints by name (multiple rows for multi-column constraints)
+      const constraintMap = new Map<string, {
+        schema: string;
+        table: string;
+        name: string;
+        type: string;
+        columns: string[];
+        foreign_table?: string;
+        foreign_columns?: string[];
+        check_clause?: string;
+      }>();
+
+      for (const row of result.rows) {
+        if (matchesBlacklist(row.table_name as string, config.safety.blacklist_tables)) continue;
+
+        const key = `${row.table_name}.${row.constraint_name}`;
+        if (!constraintMap.has(key)) {
+          constraintMap.set(key, {
+            schema: row.schema as string,
+            table: row.table_name as string,
+            name: row.constraint_name as string,
+            type: row.constraint_type as string,
+            columns: [],
+            foreign_table: row.foreign_table_name as string | undefined,
+            foreign_columns: [],
+            check_clause: row.check_clause as string | undefined,
+          });
+        }
+
+        const constraint = constraintMap.get(key)!;
+        if (row.column_name && !constraint.columns.includes(row.column_name as string)) {
+          constraint.columns.push(row.column_name as string);
+        }
+        if (row.foreign_column_name && !constraint.foreign_columns?.includes(row.foreign_column_name as string)) {
+          constraint.foreign_columns?.push(row.foreign_column_name as string);
+        }
+      }
+
+      const constraints = Array.from(constraintMap.values()).map((c) => {
+        const result: Record<string, unknown> = {
+          schema: c.schema,
+          table: c.table,
+          name: c.name,
+          type: c.type,
+          columns: c.columns,
+        };
+
+        if (c.type === "FOREIGN KEY" && c.foreign_table) {
+          result.references = {
+            table: c.foreign_table,
+            columns: c.foreign_columns,
+          };
+        }
+
+        if (c.type === "CHECK" && c.check_clause) {
+          result.check_clause = c.check_clause;
+        }
+
+        return result;
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                schema,
+                table: table || "all",
+                type: type || "all",
+                constraints,
+                count: constraints.length,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_explain",
+  "Get query execution plan (EXPLAIN)",
+  {
+    query: z.string().describe("SQL query to explain"),
+    params: z.array(z.unknown()).optional().describe("Query parameters ($1, $2, etc)"),
+    analyze: z.boolean().optional().describe("Actually execute the query (careful with writes!)"),
+    format: z.enum(["text", "json"]).optional().describe("Output format (default: json)"),
+  },
+  async ({ query, params, analyze = false, format = "json" }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // If analyze is true and query is not SELECT, require write permission
+    const upperQuery = query.toUpperCase().trim();
+    if (analyze && !upperQuery.startsWith("SELECT") && !upperQuery.startsWith("WITH")) {
+      if (!config.permissions.write) {
+        return {
+          content: [{ type: "text", text: "Permission denied: ANALYZE on write queries requires write permission" }],
+        };
+      }
+    }
+
+    // Check for blocked patterns
+    const blocked = containsBlockedPattern(query, config.safety.blocked_patterns);
+    if (blocked) {
+      return { content: [{ type: "text", text: `Blocked pattern detected: ${blocked}` }] };
+    }
+
+    try {
+      const explainQuery = `EXPLAIN (FORMAT ${format.toUpperCase()}${analyze ? ", ANALYZE" : ""}) ${query}`;
+
+      const start = Date.now();
+      const client = await pool.connect();
+
+      try {
+        const result = await withTimeout(
+          client.query(explainQuery, params),
+          config.neverhang.query_timeout,
+          "EXPLAIN timed out"
+        );
+
+        const duration = Date.now() - start;
+
+        if (format === "json") {
+          const plan = result.rows[0]["QUERY PLAN"];
+
+          // Extract key metrics from the plan
+          const topNode = Array.isArray(plan) ? plan[0].Plan : plan.Plan;
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    query: query.slice(0, 200) + (query.length > 200 ? "..." : ""),
+                    analyzed: analyze,
+                    plan: {
+                      node_type: topNode["Node Type"],
+                      startup_cost: topNode["Startup Cost"],
+                      total_cost: topNode["Total Cost"],
+                      plan_rows: topNode["Plan Rows"],
+                      plan_width: topNode["Plan Width"],
+                      ...(analyze && {
+                        actual_rows: topNode["Actual Rows"],
+                        actual_loops: topNode["Actual Loops"],
+                        actual_time: topNode["Actual Total Time"],
+                      }),
+                    },
+                    full_plan: plan,
+                    execution_time: formatDuration(duration),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        } else {
+          // Text format
+          const planText = result.rows.map((r) => r["QUERY PLAN"]).join("\n");
+
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    query: query.slice(0, 200) + (query.length > 200 ? "..." : ""),
+                    analyzed: analyze,
+                    plan: planText,
+                    execution_time: formatDuration(duration),
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+      } finally {
+        client.release();
+      }
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 

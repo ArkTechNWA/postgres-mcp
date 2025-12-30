@@ -16,10 +16,10 @@
 - [x] Statement timeout
 - [x] Column blacklist (password, token, etc)
 
-## Phase 2: Schema Deep Dive
-- [ ] `pg_indexes`
-- [ ] `pg_constraints`
-- [ ] `pg_explain` (query plan)
+## Phase 2: Schema Deep Dive ✓
+- [x] `pg_indexes`
+- [x] `pg_constraints`
+- [x] `pg_explain` (query plan)
 
 ## Phase 3: Safety System
 - [ ] Table blacklist patterns
@@ -53,4 +53,4 @@
 
 ---
 
-**Status:** v0.1.0 released (read-only core)
+**Status:** v0.2.0 released (schema deep dive)
