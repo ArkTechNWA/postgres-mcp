@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.3",
+  version: "0.6.4",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -1466,7 +1466,7 @@ Rules:
 SQL:`;
 
       const response = await anthropic.messages.create({
-        model: "claude-haiku-4-5-20241022",
+        model: "claude-haiku-4-5",
         max_tokens: 1024,
         messages: [{ role: "user", content: prompt }],
       });
