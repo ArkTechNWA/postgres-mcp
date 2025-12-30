@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server for PostgreSQL integration. Give your AI assistant safe, controlled access to your databases.
 
-**Status:** Alpha (v0.1.0)
+**Status:** v0.6.9
 
 **Author:** Claude + MOD
 
@@ -26,15 +26,23 @@ postgres-mcp connects Claude to your PostgreSQL databases — with granular perm
 2. **Query safety** — Statement timeouts, row limits, dangerous pattern blocking
 3. **Schema awareness** — Introspection without data exposure
 4. **Never hang** — Timeouts on everything, cancellation support
-5. **Fallback AI** — Haiku for query optimization and schema analysis
+5. **Natural language** — Ask questions in plain English, get SQL + results
 
 ---
 
 ## Features
 
+### Natural Language (v0.6)
+- **pg_ask** — Ask questions in plain English, get SQL + results
+- Powered by Claude Sonnet for accurate SQL generation
+- Automatic schema context gathering
+- Fallback mode works without API key (returns schema for caller to generate SQL)
+
 ### Perception (Read)
 - Execute SELECT queries
 - Schema introspection (tables, columns, indexes, constraints)
+- **pg_schema** — Unified table view (columns + indexes + constraints in one call)
+- **pg_sample** — Sample rows with blacklist filtering
 - Explain query plans
 - Database statistics
 - Active connections and locks
@@ -44,10 +52,11 @@ postgres-mcp connects Claude to your PostgreSQL databases — with granular perm
 - DDL operations (permission-gated)
 - Transaction support
 
-### Analysis (AI-Assisted)
-- Query optimization suggestions
-- Schema design analysis
-- Index recommendations
+### Reliability (v0.5 NEVERHANG)
+- Circuit breaker with automatic recovery
+- Adaptive timeouts based on query complexity
+- Health monitoring with degraded state handling
+- Connection pool management
 
 ---
 
@@ -200,6 +209,42 @@ Returns:
 }
 ```
 
+### Natural Language (v0.6)
+
+#### `pg_ask`
+Ask a question in natural language — translates to SQL and executes.
+
+```typescript
+pg_ask({
+  question: string,           // "How many users signed up this month?"
+  tables?: string[],          // limit to specific tables
+  schema?: string,            // default: "public"
+  timeout_ms?: number         // override timeout
+})
+```
+
+Returns:
+```json
+{
+  "question": "How many users signed up this month?",
+  "generated_sql": "SELECT COUNT(*) FROM users WHERE created >= DATE_TRUNC('month', CURRENT_DATE)",
+  "rows": [{"count": "142"}],
+  "row_count": 1,
+  "execution_time": "3.2s"
+}
+```
+
+**Fallback mode:** If `ANTHROPIC_API_KEY` is not set, returns schema context for the caller to generate SQL:
+```json
+{
+  "mode": "fallback",
+  "message": "pg_ask fallback mode activated. To enable direct NL→SQL via Sonnet, add ANTHROPIC_API_KEY to ~/.claude.json under mcpServers.postgres-mcp.env",
+  "question": "How many users?",
+  "schema_context": "CREATE TABLE users (id, email, created...)",
+  "instructions": { "step_1": "Analyze schema", "step_2": "Generate SQL", "step_3": "Use pg_query" }
+}
+```
+
 ### Schema Introspection
 
 #### `pg_tables`
@@ -282,14 +327,49 @@ pg_constraints({
 ```
 
 #### `pg_schema`
-Get complete schema for a table (columns, indexes, constraints, relations).
+Get complete schema for a table (columns, indexes, constraints) in one call.
 
 ```typescript
 pg_schema({
   table: string,
-  schema?: string,
-  include_stats?: boolean
+  schema?: string            // default: "public"
 })
+```
+
+Returns:
+```json
+{
+  "table": "users",
+  "columns": [...],
+  "indexes": [...],
+  "constraints": [...]
+}
+```
+
+#### `pg_sample`
+Get sample rows from a table (respects column blacklist).
+
+```typescript
+pg_sample({
+  table: string,
+  schema?: string,            // default: "public"
+  limit?: number,             // default: 5, max: 20
+  order_by?: string           // default: primary key
+})
+```
+
+Returns:
+```json
+{
+  "table": "users",
+  "sample_rows": [
+    {"id": 1, "email": "alice@example.com", "created": "2025-01-01"},
+    {"id": 2, "email": "bob@example.com", "created": "2025-01-02"}
+  ],
+  "columns_shown": 3,
+  "columns_hidden": 1,
+  "note": "password column hidden (blacklisted)"
+}
 ```
 
 ### Query Analysis
@@ -433,25 +513,29 @@ Database queries can hang indefinitely. A missing index + large table = disaster
 
 ---
 
-## Fallback AI
+## AI Integration (v0.6)
 
-Optional Haiku for query optimization.
+`pg_ask` uses Claude Sonnet to translate natural language to SQL.
+
+**Configuration:** Add `ANTHROPIC_API_KEY` to your MCP server environment:
 
 ```json
 {
-  "fallback": {
-    "enabled": true,
-    "model": "claude-haiku-4-5",
-    "api_key_env": "PG_MCP_FALLBACK_KEY",
-    "max_tokens": 500
+  "mcpServers": {
+    "postgres-mcp": {
+      "command": "node",
+      "args": ["/path/to/postgres-mcp/dist/index.js"],
+      "env": {
+        "PGHOST": "localhost",
+        "PGDATABASE": "myapp",
+        "ANTHROPIC_API_KEY": "sk-ant-..."
+      }
+    }
   }
 }
 ```
 
-**When used:**
-- `pg_analyze_query` with `use_ai: true`
-- `pg_suggest_schema` for design recommendations
-- Natural language to SQL (future)
+**Fallback mode:** If no API key is set, `pg_ask` returns schema context with instructions for the caller to generate SQL. This allows the tool to provide value even without a separate API key.
 
 ---
 
