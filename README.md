@@ -14,9 +14,21 @@ A Model Context Protocol (MCP) server for PostgreSQL integration. Give your AI a
 
 ## Why?
 
-Your AI assistant can write SQL, but it can't see your actual schema. It can suggest queries, but can't run them to verify. It's blind to your data model.
+Your AI assistant can write SQL but can't see your schema, can't run queries to verify, can't explore your data model. It's guessing.
 
-postgres-mcp connects Claude to your PostgreSQL databases — with granular permission control, query safety, and read-only defaults.
+"Just give it database credentials" — bad idea. One missing index + large table = hung query = frozen assistant. One hallucinated DELETE = disaster. No guardrails, no recovery.
+
+postgres-mcp is **an intelligent interface**, not a connection wrapper:
+
+| Problem | postgres-mcp Solution |
+|---------|----------------------|
+| Queries can hang forever | NEVERHANG — adaptive timeouts, circuit breaker |
+| No visibility into database health | Health monitoring with degraded state detection |
+| Failures cascade | Circuit breaker opens, queries fail fast, auto-recovery |
+| All-or-nothing access | Granular: read-only default, table blacklist, permission tiers |
+| AI can't verify its SQL | Schema introspection + natural language queries |
+
+**Prometheus tells you the database is on fire. NEVERHANG lets you walk through the fire without getting burned.**
 
 ---
 

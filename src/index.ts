@@ -534,7 +534,7 @@ server.tool(
 
 server.tool(
   "pg_constraints",
-  "Get constraint information (PK, FK, unique, check)",
+  "Get table constraints",
   {
     table: z.string().optional().describe("Table name (optional - all tables if omitted)"),
     schema: z.string().optional().describe("Schema name (default: public)"),
@@ -682,7 +682,7 @@ server.tool(
 
 server.tool(
   "pg_explain",
-  "Get query execution plan (EXPLAIN)",
+  "Get query execution plan",
   {
     query: z.string().describe("SQL query to explain"),
     params: z.array(z.unknown()).optional().describe("Query parameters ($1, $2, etc)"),
@@ -842,7 +842,7 @@ function extractTargetTable(query: string): string | null {
 
 server.tool(
   "pg_execute",
-  "Execute INSERT/UPDATE/DELETE queries (requires write permission)",
+  "Execute INSERT/UPDATE/DELETE",
   {
     query: z.string().describe("SQL query (INSERT, UPDATE, or DELETE)"),
     params: z.array(z.unknown()).optional().describe("Query parameters ($1, $2, etc)"),
@@ -1280,7 +1280,7 @@ server.tool(
 
 server.tool(
   "pg_health",
-  "Get database health status, circuit breaker state, and connection pool stats",
+  "Check database health and responsiveness",
   {},
   async () => {
     const stats = neverhang.getStats();
@@ -1717,7 +1717,7 @@ server.tool(
 
 server.tool(
   "pg_sample",
-  "Get sample rows from a table (respects column blacklist)",
+  "Get sample rows from a table",
   {
     table: z.string().describe("Table name"),
     schema: z.string().optional().describe("Schema name (default: public)"),
