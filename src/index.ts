@@ -21,6 +21,7 @@ import {
   containsBlockedPattern,
   truncate,
 } from "./utils.js";
+import { NeverhangManager, NeverhangError } from "./neverhang.js";
 
 const { Pool } = pg;
 
@@ -32,10 +33,10 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.1.0",
+  version: "0.5.0",
 });
 
-// Initialize connection pool
+// Initialize connection pool with NEVERHANG settings
 const poolConfig: pg.PoolConfig = {
   host: config.connection.host,
   port: config.connection.port,
@@ -44,15 +45,27 @@ const poolConfig: pg.PoolConfig = {
   password: config.connection.password,
   ssl: config.connection.ssl,
   connectionString: config.connection.connectionString,
-  connectionTimeoutMillis: config.neverhang.connect_timeout,
-  statement_timeout: config.safety.statement_timeout,
-  max: 5,
+  connectionTimeoutMillis: config.neverhang.connection_timeout_ms,
+  statement_timeout: config.neverhang.base_timeout_ms,
+  max: config.neverhang.max_connections,
+  min: config.neverhang.min_connections,
+  idleTimeoutMillis: config.neverhang.idle_timeout_ms,
 };
 
 const pool = new Pool(poolConfig);
 
+// Initialize NEVERHANG manager with ping function
+const neverhang = new NeverhangManager(config.neverhang, async () => {
+  const client = await pool.connect();
+  try {
+    await client.query("SELECT 1");
+  } finally {
+    client.release();
+  }
+});
+
 // ============================================================================
-// HELPER: Safe query execution
+// HELPER: Safe query execution with NEVERHANG
 // ============================================================================
 
 interface QueryResult {
@@ -65,15 +78,33 @@ interface QueryResult {
 async function safeQuery(
   sql: string,
   params?: unknown[],
-  options?: { maxRows?: number }
+  options?: { maxRows?: number; timeout_ms?: number }
 ): Promise<QueryResult> {
   const maxRows = options?.maxRows ?? config.safety.max_rows;
+  const start = Date.now();
+
+  // NEVERHANG: Circuit breaker check
+  const canExecute = neverhang.canExecute();
+  if (!canExecute.allowed) {
+    throw new NeverhangError(
+      "circuit_open",
+      canExecute.reason || "Circuit breaker open",
+      Date.now() - start
+    );
+  }
 
   // Check for blocked patterns
   const blocked = containsBlockedPattern(sql, config.safety.blocked_patterns);
   if (blocked) {
-    throw new Error(`Blocked pattern detected: ${blocked}`);
+    throw new NeverhangError(
+      "permission_denied",
+      `Blocked pattern detected: ${blocked}`,
+      Date.now() - start
+    );
   }
+
+  // NEVERHANG: Get adaptive timeout
+  const { timeout_ms, reason: timeoutReason } = neverhang.getTimeout(sql, options?.timeout_ms);
 
   // Add LIMIT if not present and it's a SELECT
   let finalSql = sql;
@@ -82,15 +113,31 @@ async function safeQuery(
     finalSql = `${sql} LIMIT ${maxRows}`;
   }
 
-  const start = Date.now();
-  const client = await pool.connect();
+  let client: pg.PoolClient;
+  try {
+    client = await withTimeout(
+      pool.connect(),
+      config.neverhang.connection_timeout_ms,
+      "Connection timeout"
+    );
+  } catch (error) {
+    neverhang.recordFailure(sql);
+    throw new NeverhangError(
+      "connection_failed",
+      `Failed to connect: ${error instanceof Error ? error.message : "Unknown"}`,
+      Date.now() - start,
+      { cause: error instanceof Error ? error : undefined }
+    );
+  }
 
   try {
     const result = await withTimeout(
       client.query(finalSql, params),
-      config.neverhang.query_timeout,
-      "Query timed out"
+      timeout_ms,
+      `Query timed out after ${timeout_ms}ms (${timeoutReason})`
     );
+
+    neverhang.recordSuccess();
 
     return {
       rows: result.rows,
@@ -98,6 +145,27 @@ async function safeQuery(
       fields: result.fields.map((f) => ({ name: f.name, dataTypeID: f.dataTypeID })),
       duration: Date.now() - start,
     };
+  } catch (error) {
+    const duration = Date.now() - start;
+
+    // Determine failure type
+    const errorMsg = error instanceof Error ? error.message : "Unknown";
+    let failureType: "timeout" | "query_error" | "connection_failed" = "query_error";
+
+    if (errorMsg.includes("timed out") || errorMsg.includes("timeout")) {
+      failureType = "timeout";
+    } else if (errorMsg.includes("connect") || errorMsg.includes("ECONNREFUSED")) {
+      failureType = "connection_failed";
+    }
+
+    neverhang.recordFailure(sql);
+
+    throw new NeverhangError(
+      failureType,
+      errorMsg,
+      duration,
+      { cause: error instanceof Error ? error : undefined }
+    );
   } finally {
     client.release();
   }
@@ -632,10 +700,15 @@ server.tool(
       const client = await pool.connect();
 
       try {
+        // EXPLAIN ANALYZE gets 3x timeout per NEVERHANG spec
+        const explainTimeout = analyze
+          ? config.neverhang.base_timeout_ms * 3
+          : config.neverhang.base_timeout_ms;
+
         const result = await withTimeout(
           client.query(explainQuery, params),
-          config.neverhang.query_timeout,
-          "EXPLAIN timed out"
+          explainTimeout,
+          `EXPLAIN timed out after ${explainTimeout}ms`
         );
 
         const duration = Date.now() - start;
@@ -808,15 +881,28 @@ server.tool(
 
     try {
       const start = Date.now();
+
+      // NEVERHANG: Circuit breaker check
+      const canExecute = neverhang.canExecute();
+      if (!canExecute.allowed) {
+        return {
+          content: [{ type: "text", text: `Circuit open: ${canExecute.reason}` }],
+        };
+      }
+
+      // NEVERHANG: Get adaptive timeout
+      const { timeout_ms } = neverhang.getTimeout(query);
+
       const client = await pool.connect();
 
       try {
         const result = await withTimeout(
           client.query(finalQuery, params),
-          config.neverhang.query_timeout,
-          "Query timed out"
+          timeout_ms,
+          `Query timed out after ${timeout_ms}ms`
         );
 
+        neverhang.recordSuccess();
         const duration = Date.now() - start;
 
         const response: Record<string, unknown> = {
@@ -846,6 +932,7 @@ server.tool(
         client.release();
       }
     } catch (error) {
+      neverhang.recordFailure(query);
       return {
         content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
       };
@@ -1171,15 +1258,81 @@ server.tool(
 );
 
 // ============================================================================
+// TOOLS: NEVERHANG Health (v0.5.0)
+// ============================================================================
+
+server.tool(
+  "pg_health",
+  "Get database health status, circuit breaker state, and connection pool stats",
+  {},
+  async () => {
+    const stats = neverhang.getStats();
+    const poolStats = {
+      total: pool.totalCount,
+      idle: pool.idleCount,
+      waiting: pool.waitingCount,
+    };
+
+    // Format time until circuit opens
+    let circuitOpensIn: string | null = null;
+    if (stats.circuit_opens_in !== null) {
+      circuitOpensIn = `${Math.ceil(stats.circuit_opens_in / 1000)}s`;
+    }
+
+    return {
+      content: [
+        {
+          type: "text",
+          text: JSON.stringify(
+            {
+              database: config.connection.database,
+              health: {
+                status: stats.status,
+                circuit: stats.circuit,
+                circuit_opens_in: circuitOpensIn,
+              },
+              latency: {
+                current_ms: stats.latency_ms,
+                p95_ms: stats.latency_p95_ms,
+              },
+              pool: poolStats,
+              failures: {
+                recent: stats.recent_failures,
+                last_failure: stats.last_failure,
+              },
+              last_success: stats.last_success,
+              uptime_percent: neverhang.getUptimePercent(),
+              config: {
+                base_timeout_ms: config.neverhang.base_timeout_ms,
+                connection_timeout_ms: config.neverhang.connection_timeout_ms,
+                circuit_threshold: config.neverhang.circuit_failure_threshold,
+                adaptive_timeout: config.neverhang.adaptive_timeout,
+              },
+            },
+            null,
+            2
+          ),
+        },
+      ],
+    };
+  }
+);
+
+// ============================================================================
 // SERVER STARTUP
 // ============================================================================
 
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("[postgres-mcp] Running on stdio");
+
+  // Start NEVERHANG background health monitoring
+  neverhang.start();
+
+  console.error("[postgres-mcp] Running on stdio (NEVERHANG v2.0)");
   console.error(`[postgres-mcp] Permissions: read=${config.permissions.read}, write=${config.permissions.write}`);
-  console.error(`[postgres-mcp] Safety: max_rows=${config.safety.max_rows}, timeout=${config.safety.statement_timeout}ms`);
+  console.error(`[postgres-mcp] NEVERHANG: base_timeout=${config.neverhang.base_timeout_ms}ms, connect_timeout=${config.neverhang.connection_timeout_ms}ms`);
+  console.error(`[postgres-mcp] Circuit: threshold=${config.neverhang.circuit_failure_threshold} failures, open_duration=${config.neverhang.circuit_open_duration_ms}ms`);
   console.error(`[postgres-mcp] Database: ${config.connection.host}:${config.connection.port}/${config.connection.database}`);
 }
 
@@ -1190,11 +1343,13 @@ main().catch((error) => {
 
 // Cleanup on exit
 process.on("SIGINT", async () => {
+  neverhang.stop();
   await pool.end();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
+  neverhang.stop();
   await pool.end();
   process.exit(0);
 });

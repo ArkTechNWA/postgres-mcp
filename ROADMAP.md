@@ -34,6 +34,15 @@
 - [x] `pg_locks`
 - [x] `pg_size`
 
+## Phase 6: NEVERHANG v2.0 ✓
+- [x] HealthMonitor (background pings, healthy/degraded/unhealthy)
+- [x] CircuitBreaker (5 failures → fast-reject for 30s)
+- [x] AdaptiveTimeout (10s base × health × complexity)
+- [x] Connection TTL (5 min recycle, zombie detection)
+- [x] NeverhangError (failure taxonomy with suggestions)
+- [x] `pg_health` tool (circuit state, latency, pool stats)
+- [x] Reduced timeouts (connection 10s→2s, query 30s→10s)
+
 ## Deferred (may not ship)
 - [ ] Transaction support
 - [ ] AI analysis (pg_analyze_query)
@@ -47,7 +56,8 @@
 | 0.2.0 | 2 | Schema deep dive |
 | 0.3.0 | 3+4 | Safety system + write operations |
 | 0.4.0 | 5 | Statistics |
+| 0.5.0 | 6 | NEVERHANG v2.0 |
 
 ---
 
-**Status:** v0.4.0 released (feature complete)
+**Status:** v0.5.0 released (NEVERHANG v2.0 - reliability is a methodology)

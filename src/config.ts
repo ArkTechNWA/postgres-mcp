@@ -4,6 +4,7 @@
 
 import { existsSync, readFileSync } from "fs";
 import { join } from "path";
+import { NeverhangConfig, DEFAULT_NEVERHANG_CONFIG } from "./neverhang.js";
 
 export interface Config {
   connection: {
@@ -21,17 +22,13 @@ export interface Config {
     ddl: boolean;
   };
   safety: {
-    statement_timeout: number;  // ms
     max_rows: number;
     blacklist_tables: string[];
     blacklist_columns: string[];
     require_where: boolean;
     blocked_patterns: string[];
   };
-  neverhang: {
-    connect_timeout: number;
-    query_timeout: number;
-  };
+  neverhang: NeverhangConfig;
 }
 
 const DEFAULT_CONFIG: Config = {
@@ -46,7 +43,6 @@ const DEFAULT_CONFIG: Config = {
     ddl: false,
   },
   safety: {
-    statement_timeout: 30000,
     max_rows: 1000,
     blacklist_tables: [],
     blacklist_columns: ["password", "password_hash", "secret", "token", "api_key"],
@@ -57,10 +53,7 @@ const DEFAULT_CONFIG: Config = {
       "TRUNCATE",
     ],
   },
-  neverhang: {
-    connect_timeout: 10000,
-    query_timeout: 30000,
-  },
+  neverhang: DEFAULT_NEVERHANG_CONFIG,
 };
 
 export function loadConfig(): Config {
@@ -96,7 +89,14 @@ export function loadConfig(): Config {
   if (process.env.PG_MCP_WRITE === "true") config.permissions.write = true;
   if (process.env.PG_MCP_DDL === "true") config.permissions.ddl = true;
   if (process.env.PG_MCP_MAX_ROWS) config.safety.max_rows = parseInt(process.env.PG_MCP_MAX_ROWS);
-  if (process.env.PG_MCP_TIMEOUT) config.safety.statement_timeout = parseInt(process.env.PG_MCP_TIMEOUT);
+
+  // NEVERHANG env overrides
+  if (process.env.PG_MCP_TIMEOUT) {
+    config.neverhang.base_timeout_ms = parseInt(process.env.PG_MCP_TIMEOUT);
+  }
+  if (process.env.PG_MCP_CONNECT_TIMEOUT) {
+    config.neverhang.connection_timeout_ms = parseInt(process.env.PG_MCP_CONNECT_TIMEOUT);
+  }
 
   return config;
 }
