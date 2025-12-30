@@ -29,16 +29,22 @@ export async function withTimeout<T>(
 /**
  * Format bytes to human readable
  */
-export function formatBytes(bytes: number | null | undefined): string {
+export function formatBytes(bytes: number | string | null | undefined): string {
+  // Handle null/undefined
   if (bytes === null || bytes === undefined) return "N/A";
-  if (bytes === 0) return "0 B";
-  if (isNaN(bytes) || bytes < 0) return "N/A";
-  if (bytes > 1e18) return "N/A";
+
+  // Coerce to number (handles string "0" from DB)
+  const num = typeof bytes === "string" ? parseFloat(bytes) : bytes;
+
+  // Handle edge cases
+  if (isNaN(num) || num < 0) return "N/A";
+  if (num === 0) return "0 B";
+  if (num > 1e18) return "N/A";
 
   const k = 1024;
   const sizes = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.min(Math.floor(Math.log(bytes) / Math.log(k)), sizes.length - 1);
-  return `${(bytes / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
+  const i = Math.min(Math.floor(Math.log(num) / Math.log(k)), sizes.length - 1);
+  return `${(num / Math.pow(k, i)).toFixed(1)} ${sizes[i]}`;
 }
 
 /**

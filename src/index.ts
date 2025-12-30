@@ -34,12 +34,23 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.0",
+  version: "0.6.1",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
 // Uses ANTHROPIC_API_KEY from environment
-const anthropic = new Anthropic();
+let anthropic: Anthropic | null = null;
+let anthropicError: string | null = null;
+
+try {
+  if (process.env.ANTHROPIC_API_KEY) {
+    anthropic = new Anthropic();
+  } else {
+    anthropicError = "ANTHROPIC_API_KEY not set. pg_ask requires this environment variable.";
+  }
+} catch (e) {
+  anthropicError = `Failed to initialize Anthropic client: ${e instanceof Error ? e.message : "Unknown error"}`;
+}
 
 // Initialize connection pool with NEVERHANG settings
 const poolConfig: pg.PoolConfig = {
@@ -1402,6 +1413,16 @@ server.tool(
   async ({ question, tables, schema = "public", timeout_ms }) => {
     if (!config.permissions.read) {
       return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check Anthropic client availability
+    if (!anthropic) {
+      return {
+        content: [{
+          type: "text",
+          text: `pg_ask unavailable: ${anthropicError || "Anthropic client not initialized"}. Set ANTHROPIC_API_KEY in the MCP server environment.`
+        }]
+      };
     }
 
     try {
