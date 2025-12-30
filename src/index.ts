@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.7",
+  version: "0.6.8",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -125,7 +125,8 @@ async function safeQuery(
   // Add LIMIT if not present and it's a SELECT
   let finalSql = sql.trim().replace(/;+$/, ""); // Strip trailing semicolons
   const upperSql = finalSql.toUpperCase();
-  if (upperSql.startsWith("SELECT") && !upperSql.includes(" LIMIT ")) {
+  const hasLimit = /\bLIMIT\b/i.test(finalSql); // Match LIMIT as word boundary (handles newlines)
+  if (upperSql.startsWith("SELECT") && !hasLimit) {
     finalSql = `${finalSql} LIMIT ${maxRows}`;
   }
 
