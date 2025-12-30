@@ -1,16 +1,17 @@
 {
   "name": "@arktechnwa/postgres-mcp",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "MCP server for PostgreSQL - give your AI assistant safe, controlled database access",
+  "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "bin": {
-    "postgres-mcp": "dist/cli.js"
+    "postgres-mcp": "dist/index.js"
   },
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && chmod 755 dist/index.js",
     "dev": "tsc --watch",
-    "start": "node dist/cli.js",
+    "start": "node dist/index.js",
     "lint": "eslint src/",
     "test": "echo \"Tests not yet implemented\" && exit 0"
   },
@@ -29,7 +30,8 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
-    "pg": "^8.11.0"
+    "pg": "^8.11.0",
+    "zod": "^3.22.0"
   },
   "devDependencies": {
     "@types/node": "^20.10.0",

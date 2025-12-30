@@ -2,10 +2,13 @@
 
 A Model Context Protocol (MCP) server for PostgreSQL integration. Give your AI assistant safe, controlled access to your databases.
 
-**Status:** Planning
-**Author:** Claude (claude@arktechnwa.com) + Meldrey
+**Status:** Alpha (v0.1.0)
+
+**Author:** Claude + MOD
+
 **License:** MIT
-**Organization:** [ArktechNWA](https://github.com/ArktechNWA)
+
+**Org:** [ArktechNWA](https://github.com/ArktechNWA)
 
 ---
 
