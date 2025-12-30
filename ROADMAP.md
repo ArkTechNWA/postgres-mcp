@@ -29,10 +29,10 @@
 - [x] Permission gating
 - [x] RETURNING handling
 
-## Phase 5: Statistics
-- [ ] `pg_connections`
-- [ ] `pg_locks`
-- [ ] `pg_size`
+## Phase 5: Statistics ✓
+- [x] `pg_connections`
+- [x] `pg_locks`
+- [x] `pg_size`
 
 ## Deferred (may not ship)
 - [ ] Transaction support
@@ -50,4 +50,4 @@
 
 ---
 
-**Status:** v0.3.0 released (safety + write operations)
+**Status:** v0.4.0 released (feature complete)

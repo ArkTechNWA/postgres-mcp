@@ -1,6 +1,6 @@
 {
   "name": "@arktechnwa/postgres-mcp",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "MCP server for PostgreSQL - give your AI assistant safe, controlled database access",
   "type": "module",
   "main": "dist/index.js",

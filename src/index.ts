@@ -19,6 +19,7 @@ import {
   formatDuration,
   matchesBlacklist,
   containsBlockedPattern,
+  truncate,
 } from "./utils.js";
 
 const { Pool } = pg;
@@ -843,6 +844,323 @@ server.tool(
         };
       } finally {
         client.release();
+      }
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+// ============================================================================
+// TOOLS: Statistics (v0.4.0)
+// ============================================================================
+
+server.tool(
+  "pg_connections",
+  "Get active database connections",
+  {
+    include_queries: z.boolean().optional().describe("Include current query for each connection"),
+  },
+  async ({ include_queries = false }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    try {
+      const query = `
+        SELECT
+          pid,
+          usename as username,
+          application_name,
+          client_addr,
+          client_port,
+          backend_start,
+          state,
+          state_change,
+          wait_event_type,
+          wait_event,
+          ${include_queries ? "query," : ""}
+          query_start,
+          EXTRACT(EPOCH FROM (now() - query_start))::int as query_duration_sec
+        FROM pg_stat_activity
+        WHERE pid <> pg_backend_pid()
+          AND datname = current_database()
+        ORDER BY backend_start DESC
+      `;
+
+      const result = await safeQuery(query, [], { maxRows: 200 });
+
+      const connections = result.rows.map((row) => ({
+        pid: row.pid,
+        username: row.username,
+        application: row.application_name || null,
+        client: row.client_addr ? `${row.client_addr}:${row.client_port}` : "local",
+        state: row.state,
+        wait_event: row.wait_event ? `${row.wait_event_type}:${row.wait_event}` : null,
+        connected_at: row.backend_start,
+        query_duration: row.query_duration_sec ? `${row.query_duration_sec}s` : null,
+        ...(include_queries && { query: row.query }),
+      }));
+
+      // Summary stats
+      const stateCounts: Record<string, number> = {};
+      for (const conn of connections) {
+        const state = String(conn.state || "unknown");
+        stateCounts[state] = (stateCounts[state] || 0) + 1;
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                database: config.connection.database,
+                total_connections: connections.length,
+                by_state: stateCounts,
+                connections,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_locks",
+  "Get current database locks",
+  {
+    blocked_only: z.boolean().optional().describe("Only show blocked/blocking locks"),
+  },
+  async ({ blocked_only = false }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    try {
+      let query = `
+        SELECT
+          l.pid,
+          l.locktype,
+          l.mode,
+          l.granted,
+          l.waitstart,
+          COALESCE(c.relname, l.locktype) as relation,
+          a.usename as username,
+          a.application_name,
+          a.state,
+          a.query,
+          EXTRACT(EPOCH FROM (now() - a.query_start))::int as query_duration_sec,
+          EXTRACT(EPOCH FROM (now() - l.waitstart))::int as wait_duration_sec
+        FROM pg_locks l
+        LEFT JOIN pg_class c ON l.relation = c.oid
+        LEFT JOIN pg_stat_activity a ON l.pid = a.pid
+        WHERE l.pid <> pg_backend_pid()
+          AND a.datname = current_database()
+      `;
+
+      if (blocked_only) {
+        query += ` AND (l.granted = false OR l.pid IN (
+          SELECT DISTINCT bl.pid FROM pg_locks bl
+          WHERE bl.granted = false
+          UNION
+          SELECT DISTINCT l2.pid FROM pg_locks l2
+          WHERE l2.relation IN (SELECT relation FROM pg_locks WHERE granted = false)
+        ))`;
+      }
+
+      query += ` ORDER BY l.granted, l.waitstart NULLS LAST`;
+
+      const result = await safeQuery(query, [], { maxRows: 200 });
+
+      const locks = result.rows.map((row) => ({
+        pid: row.pid,
+        type: row.locktype,
+        mode: row.mode,
+        granted: row.granted,
+        relation: row.relation,
+        username: row.username,
+        application: row.application_name || null,
+        state: row.state,
+        query_duration: row.query_duration_sec ? `${row.query_duration_sec}s` : null,
+        wait_duration: row.wait_duration_sec ? `${row.wait_duration_sec}s` : null,
+        query: truncate(String(row.query || ""), 100),
+      }));
+
+      // Summary
+      const blockedCount = locks.filter((l) => !l.granted).length;
+      const blockingPids = [...new Set(locks.filter((l) => !l.granted).map((l) => l.pid))];
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                database: config.connection.database,
+                total_locks: locks.length,
+                blocked_count: blockedCount,
+                blocking_pids: blockingPids,
+                locks,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_size",
+  "Get database and table sizes",
+  {
+    table: z.string().optional().describe("Specific table (omit for database overview)"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+  },
+  async ({ table, schema = "public" }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check table blacklist
+    if (table && matchesBlacklist(table, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${table} is blacklisted` }] };
+    }
+
+    try {
+      if (table) {
+        // Specific table size breakdown
+        const query = `
+          SELECT
+            pg_total_relation_size(c.oid) as total_bytes,
+            pg_table_size(c.oid) as table_bytes,
+            pg_indexes_size(c.oid) as indexes_bytes,
+            pg_total_relation_size(c.oid) - pg_table_size(c.oid) - pg_indexes_size(c.oid) as toast_bytes,
+            COALESCE(s.n_live_tup, 0) as row_estimate,
+            COALESCE(s.n_dead_tup, 0) as dead_tuples,
+            s.last_vacuum,
+            s.last_autovacuum,
+            s.last_analyze,
+            s.last_autoanalyze
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+          WHERE c.relname = $1 AND n.nspname = $2
+        `;
+
+        const result = await safeQuery(query, [table, schema], { maxRows: 1 });
+
+        if (result.rows.length === 0) {
+          return { content: [{ type: "text", text: `Table not found: ${schema}.${table}` }] };
+        }
+
+        const row = result.rows[0];
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  schema,
+                  table,
+                  size: {
+                    total: formatBytes(row.total_bytes as number | null),
+                    table: formatBytes(row.table_bytes as number | null),
+                    indexes: formatBytes(row.indexes_bytes as number | null),
+                    toast: formatBytes(row.toast_bytes as number | null),
+                  },
+                  rows: {
+                    estimate: formatRowCount(row.row_estimate as number),
+                    dead_tuples: row.dead_tuples,
+                  },
+                  maintenance: {
+                    last_vacuum: row.last_vacuum,
+                    last_autovacuum: row.last_autovacuum,
+                    last_analyze: row.last_analyze,
+                    last_autoanalyze: row.last_autoanalyze,
+                  },
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      } else {
+        // Database overview
+        const dbQuery = `
+          SELECT
+            pg_database_size(current_database()) as db_size,
+            (SELECT count(*) FROM pg_stat_user_tables) as table_count,
+            (SELECT count(*) FROM pg_stat_user_indexes) as index_count
+        `;
+
+        const tableQuery = `
+          SELECT
+            schemaname as schema,
+            relname as table_name,
+            pg_total_relation_size(relid) as total_bytes,
+            n_live_tup as row_estimate
+          FROM pg_stat_user_tables
+          WHERE schemaname = $1
+          ORDER BY pg_total_relation_size(relid) DESC
+          LIMIT 20
+        `;
+
+        const [dbResult, tableResult] = await Promise.all([
+          safeQuery(dbQuery, [], { maxRows: 1 }),
+          safeQuery(tableQuery, [schema], { maxRows: 20 }),
+        ]);
+
+        const dbRow = dbResult.rows[0];
+
+        const tables = tableResult.rows
+          .filter((row) => !matchesBlacklist(row.table_name as string, config.safety.blacklist_tables))
+          .map((row) => ({
+            schema: row.schema,
+            table: row.table_name,
+            size: formatBytes(row.total_bytes as number | null),
+            size_bytes: row.total_bytes,
+            rows: formatRowCount(row.row_estimate as number),
+          }));
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  database: config.connection.database,
+                  size: formatBytes(dbRow.db_size as number | null),
+                  size_bytes: dbRow.db_size,
+                  table_count: dbRow.table_count,
+                  index_count: dbRow.index_count,
+                  largest_tables: tables,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
       }
     } catch (error) {
       return {
