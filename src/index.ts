@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.4",
+  version: "0.6.5",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -1415,6 +1415,7 @@ server.tool(
       return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
     }
 
+    let generatedSql = ""; // Track for error reporting
     try {
       const start = Date.now();
 
@@ -1428,7 +1429,7 @@ server.tool(
             type: "text",
             text: JSON.stringify({
               mode: "fallback",
-              message: "pg_ask fallback mode activated. To enable direct NL→SQL via Haiku, add ANTHROPIC_API_KEY to ~/.claude.json under mcpServers.postgres-mcp.env",
+              message: "pg_ask fallback mode activated. To enable direct NL→SQL via Sonnet, add ANTHROPIC_API_KEY to ~/.claude.json under mcpServers.postgres-mcp.env",
               question,
               schema_context: schemaContext,
               instructions: {
@@ -1466,7 +1467,7 @@ Rules:
 SQL:`;
 
       const response = await anthropic.messages.create({
-        model: "claude-haiku-4-5",
+        model: "claude-sonnet-4-5-20250514",
         max_tokens: 1024,
         messages: [{ role: "user", content: prompt }],
       });
@@ -1474,6 +1475,7 @@ SQL:`;
       // Extract SQL from response
       const sqlText = response.content[0].type === "text" ? response.content[0].text : "";
       const sql = sqlText.trim().replace(/^```sql\n?/i, "").replace(/\n?```$/i, "").trim();
+      generatedSql = sql; // Track for error reporting
 
       if (!sql || sql.length === 0) {
         return { content: [{ type: "text", text: "Failed to generate SQL from question" }] };
@@ -1520,8 +1522,10 @@ SQL:`;
         ],
       };
     } catch (error) {
+      const errMsg = error instanceof Error ? error.message : "Unknown";
+      const sqlInfo = generatedSql ? `\nGenerated SQL: ${generatedSql}` : "";
       return {
-        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+        content: [{ type: "text", text: `Error: ${errMsg}${sqlInfo}` }],
       };
     }
   }
