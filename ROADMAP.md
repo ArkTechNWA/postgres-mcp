@@ -43,10 +43,14 @@
 - [x] `pg_health` tool (circuit state, latency, pool stats)
 - [x] Reduced timeouts (connection 10s→2s, query 30s→10s)
 
+## Phase 7: Natural Language & Convenience ✓
+- [x] `pg_ask` (NL→SQL via Haiku, schema-aware)
+- [x] `pg_schema` (unified table view: columns + indexes + constraints)
+- [x] `pg_sample` (sample rows with blacklist filtering)
+
 ## Deferred (may not ship)
 - [ ] Transaction support
 - [ ] AI analysis (pg_analyze_query)
-- [ ] Natural language → SQL
 
 ---
 
@@ -57,7 +61,8 @@
 | 0.3.0 | 3+4 | Safety system + write operations |
 | 0.4.0 | 5 | Statistics |
 | 0.5.0 | 6 | NEVERHANG v2.0 |
+| 0.6.0 | 7 | NL→SQL + convenience tools |
 
 ---
 
-**Status:** v0.5.0 released (NEVERHANG v2.0 - reliability is a methodology)
+**Status:** v0.6.0 released (pg_ask: natural language queries)

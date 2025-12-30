@@ -11,6 +11,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import pg from "pg";
+import Anthropic from "@anthropic-ai/sdk";
 import { loadConfig } from "./config.js";
 import {
   withTimeout,
@@ -33,8 +34,12 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.5.0",
+  version: "0.6.0",
 });
+
+// Initialize Anthropic client for pg_ask (NL→SQL)
+// Uses ANTHROPIC_API_KEY from environment
+const anthropic = new Anthropic();
 
 // Initialize connection pool with NEVERHANG settings
 const poolConfig: pg.PoolConfig = {
@@ -1315,6 +1320,446 @@ server.tool(
         },
       ],
     };
+  }
+);
+
+// ============================================================================
+// TOOLS: Natural Language & Convenience (v0.6.0)
+// ============================================================================
+
+/**
+ * Get schema context for NL→SQL translation
+ */
+async function getSchemaContext(tables?: string[], schema = "public"): Promise<string> {
+  // Get all tables if not specified
+  const tableQuery = `
+    SELECT table_name
+    FROM information_schema.tables
+    WHERE table_schema = $1 AND table_type = 'BASE TABLE'
+    ORDER BY table_name
+  `;
+
+  const tableResult = await safeQuery(tableQuery, [schema], { maxRows: 100 });
+  const allTables = tableResult.rows.map(r => r.table_name as string)
+    .filter(t => !matchesBlacklist(t, config.safety.blacklist_tables));
+
+  const targetTables = tables && tables.length > 0
+    ? allTables.filter(t => tables.includes(t))
+    : allTables;
+
+  // Get columns for each table
+  const schemaLines: string[] = [`-- Schema: ${schema}`, ""];
+
+  for (const table of targetTables) {
+    const colQuery = `
+      SELECT
+        c.column_name,
+        c.data_type,
+        c.is_nullable,
+        c.column_default,
+        CASE WHEN pk.column_name IS NOT NULL THEN 'PK' ELSE '' END as pk
+      FROM information_schema.columns c
+      LEFT JOIN (
+        SELECT ku.column_name, ku.table_name
+        FROM information_schema.table_constraints tc
+        JOIN information_schema.key_column_usage ku
+          ON tc.constraint_name = ku.constraint_name
+        WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $2
+      ) pk ON pk.column_name = c.column_name AND pk.table_name = c.table_name
+      WHERE c.table_name = $1 AND c.table_schema = $2
+      ORDER BY c.ordinal_position
+    `;
+
+    const colResult = await safeQuery(colQuery, [table, schema], { maxRows: 100 });
+
+    schemaLines.push(`CREATE TABLE ${table} (`);
+    const colLines: string[] = [];
+
+    for (const col of colResult.rows) {
+      const isBlacklisted = matchesBlacklist(col.column_name as string, config.safety.blacklist_columns);
+      const colName = isBlacklisted ? `${col.column_name} -- REDACTED` : col.column_name;
+      const nullable = col.is_nullable === "YES" ? "" : " NOT NULL";
+      const pk = col.pk === "PK" ? " PRIMARY KEY" : "";
+      colLines.push(`  ${colName} ${col.data_type}${nullable}${pk}`);
+    }
+
+    schemaLines.push(colLines.join(",\n"));
+    schemaLines.push(");", "");
+  }
+
+  return schemaLines.join("\n");
+}
+
+server.tool(
+  "pg_ask",
+  "Ask a question in natural language - translates to SQL and executes",
+  {
+    question: z.string().describe("Natural language question about the data"),
+    tables: z.array(z.string()).optional().describe("Limit to specific tables"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+    timeout_ms: z.number().optional().describe("Override timeout"),
+  },
+  async ({ question, tables, schema = "public", timeout_ms }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    try {
+      const start = Date.now();
+
+      // Get schema context
+      const schemaContext = await getSchemaContext(tables, schema);
+
+      // Translate NL to SQL via Haiku
+      const prompt = `You are a SQL expert. Given this PostgreSQL schema:
+
+${schemaContext}
+
+Translate this question to a SELECT query:
+"${question}"
+
+Rules:
+- Return ONLY the SQL query, no explanation
+- Use PostgreSQL syntax
+- Only SELECT queries (no INSERT/UPDATE/DELETE)
+- Respect column names exactly as shown
+- If a column is marked REDACTED, do not include it in SELECT
+- Add reasonable LIMIT if not specified (max 100)
+
+SQL:`;
+
+      const response = await anthropic.messages.create({
+        model: "claude-haiku-4-5-20241022",
+        max_tokens: 1024,
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      // Extract SQL from response
+      const sqlText = response.content[0].type === "text" ? response.content[0].text : "";
+      const sql = sqlText.trim().replace(/^```sql\n?/i, "").replace(/\n?```$/i, "").trim();
+
+      if (!sql || sql.length === 0) {
+        return { content: [{ type: "text", text: "Failed to generate SQL from question" }] };
+      }
+
+      // Verify it's a SELECT
+      const upperSql = sql.toUpperCase().trim();
+      if (!upperSql.startsWith("SELECT") && !upperSql.startsWith("WITH")) {
+        return {
+          content: [{ type: "text", text: `Safety: Generated query is not a SELECT:\n${sql}` }]
+        };
+      }
+
+      // Execute the query
+      const result = await safeQuery(sql, [], { timeout_ms });
+
+      // Filter blacklisted columns from results
+      const filteredRows = result.rows.map((row) => {
+        const filtered: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(row)) {
+          if (!matchesBlacklist(key, config.safety.blacklist_columns)) {
+            filtered[key] = value;
+          }
+        }
+        return filtered;
+      });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                question,
+                generated_sql: sql,
+                rows: filteredRows,
+                row_count: result.rowCount,
+                execution_time: formatDuration(Date.now() - start),
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_schema",
+  "Get complete table schema (columns, indexes, constraints) in one call",
+  {
+    table: z.string().describe("Table name"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+  },
+  async ({ table, schema = "public" }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check table blacklist
+    if (matchesBlacklist(table, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${table} is blacklisted` }] };
+    }
+
+    try {
+      // Parallel fetch: columns, indexes, constraints
+      const [columnsResult, indexesResult, constraintsResult, sizeResult] = await Promise.all([
+        // Columns
+        safeQuery(`
+          SELECT
+            c.column_name,
+            c.data_type,
+            c.character_maximum_length,
+            c.is_nullable,
+            c.column_default,
+            col_description(
+              (SELECT oid FROM pg_class WHERE relname = c.table_name),
+              c.ordinal_position
+            ) as description,
+            CASE WHEN pk.column_name IS NOT NULL THEN true ELSE false END as is_primary_key
+          FROM information_schema.columns c
+          LEFT JOIN (
+            SELECT ku.column_name, ku.table_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage ku
+              ON tc.constraint_name = ku.constraint_name
+            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = $2
+          ) pk ON pk.column_name = c.column_name AND pk.table_name = c.table_name
+          WHERE c.table_name = $1 AND c.table_schema = $2
+          ORDER BY c.ordinal_position
+        `, [table, schema], { maxRows: 100 }),
+
+        // Indexes
+        safeQuery(`
+          SELECT
+            i.indexname as name,
+            am.amname as type,
+            idx.indisunique as is_unique,
+            idx.indisprimary as is_primary,
+            pg_get_indexdef(c.oid) as definition
+          FROM pg_indexes i
+          JOIN pg_class c ON c.relname = i.indexname
+          JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = i.schemaname
+          JOIN pg_index idx ON idx.indexrelid = c.oid
+          JOIN pg_am am ON am.oid = c.relam
+          WHERE i.tablename = $1 AND i.schemaname = $2
+          ORDER BY i.indexname
+        `, [table, schema], { maxRows: 50 }),
+
+        // Constraints
+        safeQuery(`
+          SELECT
+            tc.constraint_name as name,
+            tc.constraint_type as type,
+            kcu.column_name,
+            ccu.table_name as foreign_table,
+            ccu.column_name as foreign_column,
+            cc.check_clause
+          FROM information_schema.table_constraints tc
+          LEFT JOIN information_schema.key_column_usage kcu
+            ON tc.constraint_name = kcu.constraint_name
+          LEFT JOIN information_schema.constraint_column_usage ccu
+            ON tc.constraint_name = ccu.constraint_name
+            AND tc.constraint_type = 'FOREIGN KEY'
+          LEFT JOIN information_schema.check_constraints cc
+            ON tc.constraint_name = cc.constraint_name
+          WHERE tc.table_name = $1 AND tc.table_schema = $2
+          ORDER BY tc.constraint_type, tc.constraint_name
+        `, [table, schema], { maxRows: 50 }),
+
+        // Size
+        safeQuery(`
+          SELECT
+            pg_total_relation_size(c.oid) as total_bytes,
+            COALESCE(s.n_live_tup, 0) as row_estimate
+          FROM pg_class c
+          JOIN pg_namespace n ON n.oid = c.relnamespace
+          LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+          WHERE c.relname = $1 AND n.nspname = $2
+        `, [table, schema], { maxRows: 1 }),
+      ]);
+
+      // Format columns
+      const columns = columnsResult.rows.map((row) => {
+        const isBlacklisted = matchesBlacklist(row.column_name as string, config.safety.blacklist_columns);
+        let dataType = row.data_type as string;
+        if (row.character_maximum_length) {
+          dataType += `(${row.character_maximum_length})`;
+        }
+        return {
+          name: row.column_name,
+          type: dataType,
+          nullable: row.is_nullable === "YES",
+          default: row.column_default,
+          primary_key: row.is_primary_key,
+          description: row.description || null,
+          redacted: isBlacklisted,
+        };
+      });
+
+      // Format indexes
+      const indexes = indexesResult.rows.map((row) => ({
+        name: row.name,
+        type: row.type,
+        unique: row.is_unique,
+        primary: row.is_primary,
+        definition: row.definition,
+      }));
+
+      // Group constraints
+      const constraintMap = new Map<string, {
+        name: string;
+        type: string;
+        columns: string[];
+        foreign_table?: string;
+        foreign_column?: string;
+        check_clause?: string;
+      }>();
+
+      for (const row of constraintsResult.rows) {
+        const key = row.name as string;
+        if (!constraintMap.has(key)) {
+          constraintMap.set(key, {
+            name: row.name as string,
+            type: row.type as string,
+            columns: [],
+            foreign_table: row.foreign_table as string | undefined,
+            foreign_column: row.foreign_column as string | undefined,
+            check_clause: row.check_clause as string | undefined,
+          });
+        }
+        const constraint = constraintMap.get(key)!;
+        if (row.column_name && !constraint.columns.includes(row.column_name as string)) {
+          constraint.columns.push(row.column_name as string);
+        }
+      }
+
+      const constraints = Array.from(constraintMap.values());
+
+      // Size info
+      const sizeRow = sizeResult.rows[0] || {};
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                schema,
+                table,
+                size: formatBytes(sizeRow.total_bytes as number | null),
+                row_estimate: formatRowCount(sizeRow.row_estimate as number || 0),
+                columns,
+                indexes,
+                constraints,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
+  }
+);
+
+server.tool(
+  "pg_sample",
+  "Get sample rows from a table (respects column blacklist)",
+  {
+    table: z.string().describe("Table name"),
+    schema: z.string().optional().describe("Schema name (default: public)"),
+    limit: z.number().optional().describe("Number of rows (default: 5, max: 20)"),
+    order_by: z.string().optional().describe("Column to order by (default: primary key or first column)"),
+  },
+  async ({ table, schema = "public", limit = 5, order_by }) => {
+    if (!config.permissions.read) {
+      return { content: [{ type: "text", text: "Permission denied: read access not enabled" }] };
+    }
+
+    // Check table blacklist
+    if (matchesBlacklist(table, config.safety.blacklist_tables)) {
+      return { content: [{ type: "text", text: `Permission denied: ${table} is blacklisted` }] };
+    }
+
+    // Cap limit at 20
+    const safeLimit = Math.min(Math.max(1, limit), 20);
+
+    try {
+      // Get columns to build SELECT (exclude blacklisted)
+      const colQuery = `
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = $1 AND table_schema = $2
+        ORDER BY ordinal_position
+      `;
+
+      const colResult = await safeQuery(colQuery, [table, schema], { maxRows: 100 });
+
+      const selectColumns = colResult.rows
+        .map(r => r.column_name as string)
+        .filter(c => !matchesBlacklist(c, config.safety.blacklist_columns));
+
+      if (selectColumns.length === 0) {
+        return { content: [{ type: "text", text: "No visible columns (all blacklisted)" }] };
+      }
+
+      // Get primary key for default ordering
+      let orderColumn = order_by;
+      if (!orderColumn) {
+        const pkQuery = `
+          SELECT ku.column_name
+          FROM information_schema.table_constraints tc
+          JOIN information_schema.key_column_usage ku
+            ON tc.constraint_name = ku.constraint_name
+          WHERE tc.constraint_type = 'PRIMARY KEY'
+            AND tc.table_name = $1 AND tc.table_schema = $2
+          LIMIT 1
+        `;
+        const pkResult = await safeQuery(pkQuery, [table, schema], { maxRows: 1 });
+        orderColumn = pkResult.rows[0]?.column_name as string || selectColumns[0];
+      }
+
+      // Build and execute sample query
+      const selectList = selectColumns.map(c => `"${c}"`).join(", ");
+      const sampleSql = `SELECT ${selectList} FROM "${schema}"."${table}" ORDER BY "${orderColumn}" LIMIT ${safeLimit}`;
+
+      const result = await safeQuery(sampleSql, [], { maxRows: safeLimit });
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                schema,
+                table,
+                sample_size: result.rowCount,
+                order_by: orderColumn,
+                columns: selectColumns,
+                rows: result.rows,
+              },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : "Unknown"}` }],
+      };
+    }
   }
 );
 

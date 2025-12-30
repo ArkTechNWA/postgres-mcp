@@ -1,6 +1,6 @@
 {
   "name": "@arktechnwa/postgres-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "MCP server for PostgreSQL - give your AI assistant safe, controlled database access",
   "type": "module",
   "main": "dist/index.js",
@@ -38,6 +38,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "pg": "^8.11.0",
     "zod": "^3.22.0"
@@ -45,9 +46,9 @@
   "devDependencies": {
     "@types/node": "^20.10.0",
     "@types/pg": "^8.10.0",
-    "typescript": "^5.3.0",
-    "eslint": "^8.55.0",
     "@typescript-eslint/eslint-plugin": "^6.13.0",
-    "@typescript-eslint/parser": "^6.13.0"
+    "@typescript-eslint/parser": "^6.13.0",
+    "eslint": "^8.55.0",
+    "typescript": "^5.3.0"
   }
 }
