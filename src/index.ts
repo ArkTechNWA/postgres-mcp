@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.6",
+  version: "0.6.7",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -123,10 +123,10 @@ async function safeQuery(
   const { timeout_ms, reason: timeoutReason } = neverhang.getTimeout(sql, options?.timeout_ms);
 
   // Add LIMIT if not present and it's a SELECT
-  let finalSql = sql;
-  const upperSql = sql.toUpperCase().trim();
+  let finalSql = sql.trim().replace(/;+$/, ""); // Strip trailing semicolons
+  const upperSql = finalSql.toUpperCase();
   if (upperSql.startsWith("SELECT") && !upperSql.includes(" LIMIT ")) {
-    finalSql = `${sql} LIMIT ${maxRows}`;
+    finalSql = `${finalSql} LIMIT ${maxRows}`;
   }
 
   let client: pg.PoolClient;
