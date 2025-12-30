@@ -34,7 +34,7 @@ const config = loadConfig();
 
 const server = new McpServer({
   name: "postgres-mcp",
-  version: "0.6.8",
+  version: "0.6.9",
 });
 
 // Initialize Anthropic client for pg_ask (NL→SQL)
@@ -1461,7 +1461,7 @@ Rules:
 - Return ONLY the SQL query, no explanation
 - Use PostgreSQL syntax
 - Only SELECT queries (no INSERT/UPDATE/DELETE)
-- Respect column names exactly as shown
+- Quote column names with mixed case using double quotes (e.g., "flowDisplayName")
 - If a column is marked REDACTED, do not include it in SELECT
 - Add reasonable LIMIT if not specified (max 100)
 
