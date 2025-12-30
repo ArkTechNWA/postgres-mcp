@@ -7,6 +7,17 @@
 
 ---
 
+## Trajectorial Edict
+
+> **Reliability is a methodology.**
+>
+> NEVERHANG must continually and permanently bolster stability and user+AI confidence.
+> Not a feature. Not a checkbox. A way of thinking about every line of code.
+>
+> The AI must know WHY. The user must trust THAT. Silence is failure.
+
+---
+
 ## Current State (v0.4.0)
 
 The `neverhang` config is marketing fluff wrapped around basic timeouts:
@@ -332,13 +343,113 @@ interface NeverhangConfig {
 
 ---
 
-## Open Questions
+## Resolved Questions
 
-1. Should health checks run in MCP process or separate worker?
-2. How to handle long-running EXPLAIN ANALYZE without tripping circuit?
-3. Should we expose circuit state via a `pg_health` tool?
-4. Is 10s base timeout too aggressive for complex queries?
+### Q1: Should health checks run in MCP process or separate worker?
+
+**RESOLVED: In-process.**
+
+The health check IS the canary. It must detect issues that affect the actual MCP→DB execution path, not just "is the database up somewhere." If the MCP process itself is sick (memory pressure, event loop blocked, connection pool corrupted), a separate worker wouldn't see that.
+
+The health monitor runs in the same process, using the same pool, hitting the same network path. What it sees is what queries will experience.
+
+### Q2: How to handle long-running EXPLAIN ANALYZE without tripping circuit?
+
+**RESOLVED: Extended timeout, excluded from circuit.**
+
+EXPLAIN ANALYZE is explicitly diagnostic. The user asked for deep analysis. Grant it:
+- EXPLAIN ANALYZE gets 3x base timeout (30s instead of 10s)
+- Timeouts on EXPLAIN ANALYZE do NOT count toward circuit breaker failure threshold
+- Rationale: Diagnostics ≠ health signal. A slow EXPLAIN doesn't mean the DB is sick.
+
+```typescript
+const isExplainAnalyze = upperQuery.includes('EXPLAIN') && upperQuery.includes('ANALYZE');
+if (isExplainAnalyze) {
+  timeout *= 3;
+  excludeFromCircuit = true;
+}
+```
+
+### Q3: Should we expose circuit state via a `pg_health` tool?
+
+**RESOLVED: Yes. Absolutely.**
+
+The AI must know WHY failures happen to communicate confidently. Blind error messages erode trust. A `pg_health` tool enables:
+
+```
+User: "Query the users table"
+AI: [sees circuit_open] "The database is temporarily unavailable (5 failures in the last minute).
+    I'll automatically retry in 25 seconds, or you can check status with pg_health."
+```
+
+vs.
+
+```
+User: "Query the users table"
+AI: "Error: connection failed" [no context, user loses confidence]
+```
+
+**pg_health tool spec**:
+```typescript
+{
+  status: 'healthy' | 'degraded' | 'unhealthy',
+  circuit: 'closed' | 'open' | 'half-open',
+  circuit_opens_in: null | number,  // seconds until half-open test
+  latency_ms: number,               // last ping latency
+  latency_p95_ms: number,           // 95th percentile recent
+  pool: {
+    total: number,
+    idle: number,
+    busy: number,
+    waiting: number,
+  },
+  recent_failures: number,          // failures in last 60s
+  last_success: Date,
+  last_failure: Date | null,
+  uptime_percent_1h: number,        // health over last hour
+}
+```
+
+### Q4: Is 10s base timeout too aggressive for complex queries?
+
+**RESOLVED: 10s is correct. Silence is failure.**
+
+In a chat context, 10 seconds of nothing is an eternity. The user thinks it's broken. The AI has no idea what's happening. Confidence collapses.
+
+**But legitimate complex queries exist.** Handle with:
+
+1. **Complexity detection** (automatic):
+   - JOIN detected: 1.5x
+   - Subquery detected: 2.0x
+   - Multiple tables: 1.5x
+   - Aggregation + GROUP BY: 1.5x
+   - These stack multiplicatively up to max_timeout
+
+2. **User override** (explicit):
+   - `pg_query` accepts optional `timeout_ms` parameter
+   - Capped at `max_timeout_ms` (30s)
+   - User says "this is complex, give it time"
+
+3. **Progress indication** (future consideration):
+   - SSE streaming: "Query running... (3s)"
+   - Transforms silence into communication
+   - Even if slow, user knows it's working
+
+**The principle**: Default fast. Extend explicitly. Never silent.
 
 ---
 
-*"Never hang" should mean never hang. Let's make it true.*
+## Design Principles (Expanded)
+
+Derived from the edict:
+
+1. **Fast-fail over slow-fail**: 2s of "database unreachable" beats 30s of hope
+2. **Health-aware**: Don't send queries to sick databases
+3. **Graceful degradation**: Partial functionality > total failure
+4. **Observable**: Every failure has type + duration + suggestion
+5. **AI-legible**: The AI must understand state to communicate confidently
+6. **Silence is failure**: No response = broken. Always communicate something.
+
+---
+
+*"Never hang" should mean never hang. Now it will.*
