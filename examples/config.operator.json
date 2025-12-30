@@ -1,0 +1,42 @@
+{
+  "_comment": "Operator: Read + write on specific tables",
+  "connection": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "myapp",
+    "user_env": "PGUSER",
+    "password_env": "PGPASSWORD"
+  },
+  "permissions": {
+    "read": true,
+    "write": true,
+    "ddl": false,
+    "admin": false,
+    "whitelist_schemas": ["public", "app"],
+    "whitelist_tables": [
+      "public.users",
+      "public.orders",
+      "app.*"
+    ],
+    "blacklist_tables": ["*.password*", "*.secret*", "audit.*"]
+  },
+  "query_safety": {
+    "statement_timeout": "30s",
+    "max_rows": 5000,
+    "require_where_clause": true,
+    "block_patterns": [
+      "DROP",
+      "TRUNCATE",
+      "DELETE FROM .* WHERE 1=1"
+    ]
+  },
+  "neverhang": {
+    "connect_timeout": 10000,
+    "statement_timeout": 30000
+  },
+  "fallback": {
+    "enabled": true,
+    "model": "claude-haiku-4-5",
+    "api_key_env": "PG_MCP_FALLBACK_KEY"
+  }
+}

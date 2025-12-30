@@ -1,0 +1,30 @@
+{
+  "_comment": "Read-only: SELECT queries and schema introspection only",
+  "connection": {
+    "host": "localhost",
+    "port": 5432,
+    "database": "myapp",
+    "user_env": "PGUSER",
+    "password_env": "PGPASSWORD"
+  },
+  "permissions": {
+    "read": true,
+    "write": false,
+    "ddl": false,
+    "admin": false,
+    "whitelist_schemas": ["public"],
+    "blacklist_schemas": ["pg_catalog", "information_schema"],
+    "blacklist_tables": ["*.password*", "*.secret*", "*.credential*"]
+  },
+  "query_safety": {
+    "statement_timeout": "30s",
+    "max_rows": 1000
+  },
+  "neverhang": {
+    "connect_timeout": 10000,
+    "statement_timeout": 30000
+  },
+  "fallback": {
+    "enabled": false
+  }
+}

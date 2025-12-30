@@ -1,0 +1,21 @@
+{
+  "_comment": "Full access: All operations including DDL",
+  "_warning": "DANGER ZONE - You own the consequences",
+  "connection": {
+    "url_env": "DATABASE_URL"
+  },
+  "bypass_permissions": true,
+  "query_safety": {
+    "statement_timeout": "120s",
+    "max_rows": 100000
+  },
+  "neverhang": {
+    "connect_timeout": 10000,
+    "statement_timeout": 120000
+  },
+  "fallback": {
+    "enabled": true,
+    "model": "claude-haiku-4-5",
+    "api_key_env": "PG_MCP_FALLBACK_KEY"
+  }
+}
