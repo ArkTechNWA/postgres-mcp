@@ -29,7 +29,8 @@ export async function withTimeout<T>(
 /**
  * Format bytes to human readable
  */
-export function formatBytes(bytes: number): string {
+export function formatBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined) return "N/A";
   if (bytes === 0) return "0 B";
   if (isNaN(bytes) || bytes < 0) return "N/A";
   if (bytes > 1e18) return "N/A";
